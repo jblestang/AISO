@@ -2,14 +2,9 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use chrono::{DateTime, Utc};
 use jsonschema::JSONSchema;
-use serde_json::{Map, Value};
+use serde_json::{Map, Number, Value};
 use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
-use tokio::{
-    io::AsyncWriteExt,
-    net::{TcpListener, UdpSocket},
-    sync::watch,
-    time,
-};
+use tokio::{net::UdpSocket, time};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
  
@@ -18,7 +13,6 @@ use tracing_subscriber::EnvFilter;
 /// - validates generic JSON + JSON Schema
 /// - filters to an allowlisted field subset (schema extension)
 /// - forwards sanitized JSON via UDP
-/// - exposes TCP endpoint that returns latest sanitized JSON (optional)
 #[derive(Parser, Debug, Clone)]
 #[command(name = "aisd-opensky-proxy")]
 struct Args {
@@ -33,10 +27,6 @@ struct Args {
     /// Local UDP bind (low-side)
     #[arg(long, default_value = "0.0.0.0:0")]
     udp_bind: SocketAddr,
- 
-    /// Optional TCP bind to serve latest sanitized message
-    #[arg(long, default_value = "127.0.0.1:43000")]
-    tcp_bind: SocketAddr,
  
     /// Path to JSON schema
     #[arg(long, default_value = "schema/upstream_message.schema.json")]
@@ -62,8 +52,8 @@ async fn main() -> Result<()> {
     // jsonschema 0.18 stores references into the schema; give it a stable `'static` address.
     let schema_value: &'static Value = Box::leak(Box::new(schema_value));
  
-    let allow_fields = extract_allow_fields(schema_value)
-        .context("extract x-allowUpstreamFields from schema")?;
+    let allow_fields =
+        extract_allow_fields(schema_value).context("extract x-allowUpstream flags from schema")?;
     let provider = extract_provider(schema_value).context("extract x-provider from schema")?;
     let input_schema_ptr = extract_input_schema_pointer(schema_value)
         .context("extract x-inputSchemaPointer from schema")?;
@@ -90,8 +80,6 @@ async fn main() -> Result<()> {
         .build()
         .context("build HTTP client")?;
  
-    let (tx_latest, rx_latest) = watch::channel::<Option<Vec<u8>>>(None);
- 
     let udp_socket = UdpSocket::bind(args.udp_bind)
         .await
         .with_context(|| format!("bind UDP {}", args.udp_bind))?;
@@ -105,7 +93,6 @@ async fn main() -> Result<()> {
         let allow_fields = allow_fields.clone();
         let client = client.clone();
         let udp_socket = udp_socket;
-        let tx_latest = tx_latest;
         tokio::spawn(async move {
             if let Err(e) = poll_loop(
                 &client,
@@ -117,7 +104,6 @@ async fn main() -> Result<()> {
                 compiled,
                 allow_fields,
                 udp_socket,
-                tx_latest,
             )
             .await
             {
@@ -126,13 +112,7 @@ async fn main() -> Result<()> {
         })
     };
  
-    let tcp_task = tokio::spawn(async move {
-        if let Err(e) = tcp_server(args.tcp_bind, rx_latest).await {
-            error!(error = %e, "tcp server exited");
-        }
-    });
- 
-    let _ = tokio::try_join!(poll_task, tcp_task)?;
+    let _ = tokio::try_join!(poll_task)?;
     Ok(())
 }
  
@@ -146,7 +126,6 @@ async fn poll_loop(
     schema: Arc<JSONSchema>,
     allow_fields: Arc<Vec<String>>,
     udp: UdpSocket,
-    tx_latest: watch::Sender<Option<Vec<u8>>>,
 ) -> Result<()> {
     let mut tick = time::interval(interval);
     loop {
@@ -185,8 +164,6 @@ async fn poll_loop(
                         if bytes.len() <= max_payload_bytes {
                             if let Err(e) = udp.send_to(&bytes, udp_dest).await {
                                 warn!(error = %e, "udp send failed");
-                            } else {
-                                let _ = tx_latest.send(Some(bytes));
                             }
                         } else {
                             warn!(
@@ -212,7 +189,6 @@ async fn poll_loop(
                         warn!(error = %e, "udp send failed");
                         continue;
                     }
-                    let _ = tx_latest.send(Some(single_bytes));
                     current_size_est = 2;
                 }
 
@@ -227,8 +203,6 @@ async fn poll_loop(
                         );
                     } else if let Err(e) = udp.send_to(&bytes, udp_dest).await {
                         warn!(error = %e, "udp send failed");
-                    } else {
-                        let _ = tx_latest.send(Some(bytes));
                     }
                 }
             }
@@ -395,13 +369,34 @@ fn validate_and_filter(msg: &Value, schema: &JSONSchema, allow_fields: &[String]
         );
     }
 
-    // Stage 3: canonicalize / restrict output strings to reduce covert channels.
-    // Policy: transmitted string values must not contain whitespace characters.
+    // If, for any reason, no fields survive allowlist filtering, do not emit an empty object.
+    if filtered.is_empty() {
+        return Err(anyhow!(
+            "sanitized object has no allowlisted fields; dropping message"
+        ));
+    }
+
+    // Stage 3: canonicalize numeric and string values to reduce covert channels.
+    // - Numeric policy: quantize floating-point values to a fixed number of decimal digits (five for latitude/longitude).
+    // - String policy: transmitted string values must not contain whitespace characters.
+    const SCALE: f64 = 100000.0; // five decimal digits
     for (k, v) in filtered.iter_mut() {
-        if let Value::String(s) = v {
-            if s.chars().any(|c| c == ' ' || c == '\n' || c == '\t' || c == '\r') {
-                return Err(anyhow!("string field '{}' contains whitespace", k));
+        match v {
+            Value::String(s) => {
+                if s.chars().any(|c| c == ' ' || c == '\n' || c == '\t' || c == '\r') {
+                    return Err(anyhow!("string field '{}' contains whitespace", k));
+                }
             }
+            Value::Number(n) => {
+                if let Some(f) = n.as_f64() {
+                    let quantized = (f * SCALE).round() / SCALE;
+                    *v = Value::Number(
+                        Number::from_f64(quantized)
+                            .ok_or_else(|| anyhow!("failed to encode quantized number for '{}'", k))?,
+                    );
+                }
+            }
+            _ => {}
         }
     }
 
@@ -423,61 +418,26 @@ fn validate_and_filter(msg: &Value, schema: &JSONSchema, allow_fields: &[String]
 }
  
 fn extract_allow_fields(schema: &Value) -> Result<Vec<String>> {
-    let arr = schema
-        .get("x-allowUpstreamFields")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| anyhow!("schema missing array 'x-allowUpstreamFields'"))?;
-    let mut out = Vec::with_capacity(arr.len());
-    for v in arr {
-        let s = v
-            .as_str()
-            .ok_or_else(|| anyhow!("x-allowUpstreamFields must be array of strings"))?;
-        if s.trim().is_empty() {
-            return Err(anyhow!("x-allowUpstreamFields contains empty string"));
+    let props = schema
+        .get("properties")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| anyhow!("schema missing object 'properties'"))?;
+    let mut out = Vec::new();
+    for (name, prop) in props {
+        let allow = prop
+            .get("x-allowUpstream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if allow {
+            out.push(name.clone());
         }
-        out.push(s.to_string());
     }
     if out.is_empty() {
-        return Err(anyhow!("x-allowUpstreamFields must not be empty"));
+        return Err(anyhow!(
+            "no properties marked with boolean 'x-allowUpstream: true'"
+        ));
     }
     Ok(out)
-}
- 
-async fn tcp_server(bind: SocketAddr, rx_latest: watch::Receiver<Option<Vec<u8>>>) -> Result<()> {
-    let listener = TcpListener::bind(bind)
-        .await
-        .with_context(|| format!("bind TCP {}", bind))?;
-    info!("TCP bound on {}", bind);
- 
-    loop {
-        let (mut socket, peer) = listener.accept().await?;
-        let latest = rx_latest.borrow().clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_tcp_client(&mut socket, peer, latest).await {
-                warn!(error = %e, "tcp client error");
-            }
-        });
-    }
-}
- 
-async fn handle_tcp_client(
-    socket: &mut tokio::net::TcpStream,
-    peer: SocketAddr,
-    latest: Option<Vec<u8>>,
-) -> Result<()> {
-    // Simple "push latest snapshot and close" behavior.
-    // The diode-side TCP consumer can connect and read one JSON line.
-    let payload = match latest {
-        Some(mut b) => {
-            b.push(b'\n');
-            b
-        }
-        None => b"{\"status\":\"no_data\"}\n".to_vec(),
-    };
-    socket.write_all(&payload).await?;
-    socket.shutdown().await?;
-    info!(%peer, bytes = payload.len(), "served tcp snapshot");
-    Ok(())
 }
 
 #[cfg(test)]
@@ -497,14 +457,13 @@ mod tests {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-                "ts": { "type": "string" },
-                "icao24": { "type": "string", "pattern": "^[0-9a-fA-F]{6}$" },
-                "lat": { "type": ["number", "null"] },
-                "lon": { "type": ["number", "null"] },
-                "velocity": { "type": ["number", "null"] }
+                "ts": { "type": "string", "x-allowUpstream": true },
+                "icao24": { "type": "string", "pattern": "^[0-9a-fA-F]{6}$", "x-allowUpstream": true },
+                "lat": { "type": ["number", "null"], "x-allowUpstream": true },
+                "lon": { "type": ["number", "null"], "x-allowUpstream": true },
+                "velocity": { "type": ["number", "null"], "x-allowUpstream": true }
             },
             "required": ["ts", "icao24"],
-            "x-allowUpstreamFields": ["ts","icao24","lat","lon","velocity"]
         });
         let compiled = compile_schema(schema.clone());
         let allow = extract_allow_fields(&schema).unwrap();
@@ -512,28 +471,18 @@ mod tests {
         let msg = json!({
             "icao24": "71c737",
             "ts": "2026-03-12T06:44:43+00:00",
-            "lat": 35.2928,
-            "lon": 126.7196,
+            "lat": 35.2928123,
+            "lon": 126.7196123,
             "velocity": null
         });
 
         let filtered = validate_and_filter(&msg, &compiled, &allow).unwrap();
-        assert_eq!(
-            filtered,
-            json!({
-                "icao24": "71c737",
-                "lat": 35.2928,
-                "lon": 126.7196,
-                "ts": "2026-03-12T06:44:43+00:00",
-                "velocity": null
-            })
-        );
 
-        // Deterministic serialization: alphabetical key order
+        // Deterministic serialization: alphabetical key order and quantized numbers
         let s = serde_json::to_string(&filtered).unwrap();
         assert_eq!(
             s,
-            r#"{"icao24":"71c737","lat":35.2928,"lon":126.7196,"ts":"2026-03-12T06:44:43+00:00","velocity":null}"#
+            r#"{"icao24":"71c737","lat":35.29281,"lon":126.71961,"ts":"2026-03-12T06:44:43+00:00","velocity":null}"#
         );
     }
 
@@ -544,11 +493,10 @@ mod tests {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-                "ts": { "type": "string" },
-                "icao24": { "type": "string", "pattern": "^[0-9a-fA-F]{6}$" }
+                "ts": { "type": "string", "x-allowUpstream": true },
+                "icao24": { "type": "string", "pattern": "^[0-9a-fA-F]{6}$", "x-allowUpstream": true }
             },
             "required": ["ts", "icao24"],
-            "x-allowUpstreamFields": ["ts","icao24"]
         });
         let compiled = compile_schema(schema.clone());
         let allow = extract_allow_fields(&schema).unwrap();
@@ -570,11 +518,10 @@ mod tests {
             "type": "object",
             "additionalProperties": false,
             "properties": {
-                "ts": { "type": "string" },
-                "icao24": { "type": "string", "pattern": "^[0-9a-fA-F]{6}$" }
+                "ts": { "type": "string", "x-allowUpstream": true },
+                "icao24": { "type": "string", "pattern": "^[0-9a-fA-F]{6}$", "x-allowUpstream": true }
             },
-            "required": ["ts", "icao24"],
-            "x-allowUpstreamFields": ["ts","icao24"]
+            "required": ["ts", "icao24"]
         });
         let compiled = compile_schema(schema.clone());
         let allow = extract_allow_fields(&schema).unwrap();
@@ -611,13 +558,12 @@ mod tests {
             "type": "object",
             "additionalProperties": true,
             "properties": {
-                "ts": { "type": "string" },
-                "icao24": { "type": "string" },
-                "lat": { "type": ["number", "null"] },
-                "lon": { "type": ["number", "null"] }
+                "ts": { "type": "string", "x-allowUpstream": true },
+                "icao24": { "type": "string", "x-allowUpstream": true },
+                "lat": { "type": ["number", "null"], "multipleOf": 0.00001, "x-allowUpstream": true },
+                "lon": { "type": ["number", "null"], "multipleOf": 0.00001, "x-allowUpstream": true }
             },
             "required": ["ts", "icao24"],
-            "x-allowUpstreamFields": ["ts","icao24","lat","lon"]
         });
         let compiled = compile_schema(schema.clone());
         let allow = extract_allow_fields(&schema).unwrap();
@@ -626,18 +572,18 @@ mod tests {
         let msg = json!({
             "ts": "2026-03-12T06:44:43+00:00",
             "icao24": "71c737",
-            "lat": 35.2928,
-            "lon": 126.7196,
+            "lat": 35.2928123,
+            "lon": 126.7196123,
             "covert": "     \t   \n   "
         });
 
         let filtered = validate_and_filter(&msg, &compiled, &allow).unwrap();
         let s = serde_json::to_string(&filtered).unwrap();
 
-        // Alphabetical keys: icao24, lat, lon, ts
+        // Alphabetical keys and quantized numbers
         assert_eq!(
             s,
-            r#"{"icao24":"71c737","lat":35.2928,"lon":126.7196,"ts":"2026-03-12T06:44:43+00:00"}"#
+            r#"{"icao24":"71c737","lat":35.29281,"lon":126.71961,"ts":"2026-03-12T06:44:43+00:00"}"#
         );
 
         // No whitespace outside of string values (here: none inside values either), so overall string has no whitespace.
@@ -654,8 +600,8 @@ mod tests {
         let base = json!({
             "ts": "2026-03-12T06:44:43+00:00",
             "icao24": "71c737",
-            "lat": 35.2928,
-            "lon": 126.7196,
+            "lat": 35.29281,
+            "lon": 126.71961,
             "velocity": 241.13,
             "true_track": 184.9,
             "geo_altitude": 6637.02,
@@ -810,8 +756,8 @@ mod tests {
 
     #[test]
     fn schema_extensions_missing_or_malformed_are_rejected() {
-        // Missing x-allowUpstreamFields
-        let s = json!({"type":"object"});
+        // No properties with x-allowUpstream:true
+        let s = json!({"type":"object","properties":{"ts":{"type":"string"}}});
         assert!(extract_allow_fields(&s).is_err());
 
         // Missing x-inputSchemaPointer
@@ -843,11 +789,10 @@ mod tests {
             "type": "object",
             "additionalProperties": true,
             "properties": {
-                "icao24": { "type": "string" },
-                "ts": { "type": "string" }
+                "icao24": { "type": "string", "x-allowUpstream": true },
+                "ts": { "type": "string", "x-allowUpstream": true }
             },
             "required": ["icao24","ts"],
-            "x-allowUpstreamFields": ["icao24","ts"]
         });
         let compiled = compile_schema(schema.clone());
         let allow = extract_allow_fields(&schema).unwrap();
@@ -859,5 +804,32 @@ mod tests {
 
         let err = validate_and_filter(&msg, &compiled, &allow).unwrap_err();
         assert!(err.to_string().contains("contains whitespace"));
+    }
+
+    #[test]
+    fn numeric_values_are_quantized_to_fixed_precision() {
+        let schema = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "lat": { "type": "number", "x-allowUpstream": true },
+                "lon": { "type": "number", "x-allowUpstream": true }
+            },
+            "required": ["lat","lon"]
+        });
+        let compiled = compile_schema(schema.clone());
+        let allow = extract_allow_fields(&schema).unwrap();
+
+        let msg = json!({
+            "lat": 35.2928123,
+            "lon": 126.7196123
+        });
+
+        let filtered = validate_and_filter(&msg, &compiled, &allow).unwrap();
+        let s = serde_json::to_string(&filtered).unwrap();
+
+        // Expect quantized values at five-decimal precision grid (numbers may omit trailing zeros).
+        assert_eq!(s, r#"{"lat":35.29281,"lon":126.71961}"#);
     }
 }

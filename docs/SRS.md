@@ -20,19 +20,19 @@ The software:
 - **Schema extensions**: non-standard JSON Schema keys used by this program:
   - `x-provider`
   - `x-inputSchemaPointer`
-  - `x-allowUpstreamFields`
+  - per-property `x-allowUpstream`
 
 ### 3.1 Custom JSON Schema Extensions (Normative)
 
 This software defines the following **custom JSON Schema extensions**. They are **required** for correct operation unless stated otherwise.
 
-#### EXT-001 `x-allowUpstreamFields`
+#### EXT-001 Per-property `x-allowUpstream`
 
-- **Type**: array of strings
-- **Meaning**: output allowlist of property names permitted to be transmitted upstream.
+- **Location**: under each JSON Schema property (`properties.<field>.x-allowUpstream`)
+- **Type**: boolean
+- **Meaning**: marks a property as permitted to be transmitted upstream.
 - **Rules**:
-  - The allowlist shall be used for filtering (RQ-008).
-  - Fields with `null` values shall be omitted even if allowlisted (RQ-009).
+  - Only properties with `x-allowUpstream: true` shall appear in sanitized upstream objects (RQ-008, RQ-009).
 
 #### EXT-002 `x-inputSchemaPointer`
 
@@ -109,7 +109,7 @@ The software shall validate each upstream object against the root JSON Schema.
 
 #### RQ-008 Allowlist Filtering
 
-The software shall enforce a schema extension allowlist `x-allowUpstreamFields` by dropping any upstream object properties not in the allowlist.
+The software shall enforce a schema extension allowlist by including only properties whose schemas are marked with `x-allowUpstream: true` and dropping any other properties.
 
 #### RQ-008a Filtering/Validation Ordering
 
@@ -131,6 +131,10 @@ The software shall serialize JSON outputs in a minified form with no inter-token
 
 The software shall reject (fail closed) any sanitized upstream message that contains transmitted string values with whitespace characters (space, tab, newline, carriage return).
 
+#### RQ-018 Numeric Quantization (Covert-Channel Reduction)
+
+The software shall quantize all transmitted floating-point numeric values to a fixed precision of **five** decimal digits after the decimal separator before serialization, and the upstream schema for latitude/longitude shall constrain those fields to numeric steps of `0.00001` (JSON Schema `multipleOf`).
+
 #### RQ-012 UDP Transmission
 
 The software shall send sanitized payloads via UDP to `--udp-dest`.
@@ -142,10 +146,6 @@ The software shall enforce `--max-payload-bytes` by:
 - chunking arrays into multiple UDP datagrams when possible, and/or
 - dropping oversize payloads with a warning.
 
-#### RQ-014 TCP Snapshot Service
-
-The software shall provide a TCP snapshot service that returns the latest transmitted sanitized payload as a single JSON line and then closes the connection.
-
 #### RQ-015 Logging
 
 The software shall log operational events at info/warn level, including UDP bind, TCP bind, validation drops, oversize drops, and send errors.
@@ -154,7 +154,7 @@ The software shall log operational events at info/warn level, including UDP bind
 
 The software shall fail closed (no transmission) if required schema extensions are missing or malformed, including:
 
-- missing/invalid `x-allowUpstreamFields`
+- no properties marked with valid `x-allowUpstream: true`
 - missing/invalid `x-inputSchemaPointer`
 - missing/invalid `x-provider` (including missing required properties)
 

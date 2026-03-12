@@ -48,7 +48,7 @@ Unit tests are located in `src/main.rs` under `#[cfg(test)]`.
 
 #### UT-004 Schema file extraction: provider and input schema pointer
 
-- **Requirement coverage**: RQ-002, RQ-003, RQ-004, RQ-005, RQ-006
+- **Requirement coverage**: RQ-002, RQ-003, RQ-004, RQ-005, RQ-006, RQ-008
 - **Test**: `schema_file_extracts_provider_and_input_schema_pointer`
 - **Method**:
   - Load `schema/upstream_message.schema.json`.
@@ -78,7 +78,7 @@ Unit tests are located in `src/main.rs` under `#[cfg(test)]`.
 - **Requirement coverage**: RQ-016, NFR-001
 - **Test**: `schema_extensions_missing_or_malformed_are_rejected`
 - **Method**:
-  - Attempt to extract `x-allowUpstreamFields`, `x-inputSchemaPointer`, and `x-provider` from malformed schemas.
+  - Attempt to extract `x-allowUpstream` flags, `x-inputSchemaPointer`, and `x-provider` from malformed schemas.
   - Assert extraction fails (fail closed).
 
 #### UT-008 Reject transmitted strings containing whitespace
@@ -88,6 +88,14 @@ Unit tests are located in `src/main.rs` under `#[cfg(test)]`.
 - **Method**:
   - Validate/filter a message where an allowlisted string contains whitespace.
   - Assert the message is rejected (fail closed).
+
+#### UT-009 Numeric quantization to fixed precision
+
+- **Requirement coverage**: RQ-018, NFR-001
+- **Test**: `numeric_values_are_quantized_to_fixed_precision`
+- **Method**:
+  - Validate/filter a message with floating-point numeric fields.
+  - Assert the serialized output uses a fixed fractional precision (five decimal digits for latitude/longitude) compatible with the schema `multipleOf` constraint.
 
 ### 4. Integration / Manual Tests
 
@@ -108,20 +116,9 @@ cargo run --release -- --udp-dest 127.0.0.1:42000 --poll-secs 5
 
 Observe JSON arrays being received (one per poll, possibly chunked).
 
-#### IT-002 TCP snapshot via netcat
-
-- **Requirement coverage**: RQ-014
-- **Procedure**:
-
-```bash
-nc 127.0.0.1 43000
-```
-
-Observe one JSON line returned and connection closed.
-
 ### 5. Traceability Matrix (Requirements → Tests)
 
-- **RQ-001**: (manual) IT-001/IT-002 via running proxy
+- **RQ-001**: (manual) IT-001 via running proxy
 - **RQ-002**: UT-004
 - **RQ-003**: UT-004 (extraction); (functional) exercised by runtime polling
 - **RQ-004**: UT-004
@@ -135,9 +132,9 @@ Observe one JSON line returned and connection closed.
 - **RQ-011**: UT-001, UT-005
 - **RQ-012**: IT-001
 - **RQ-013**: IT-001 (observational); covered by design, can be expanded with mock tests
-- **RQ-014**: IT-002
 - **RQ-015**: (manual) observe logs while running
 - **RQ-016**: UT-007
 - **RQ-017**: UT-008
+- **RQ-018**: UT-009
 
 Note: some requirements are best verified as integration/manual (network I/O). If you want full automation, we can add mocked HTTP + UDP receiver tests.

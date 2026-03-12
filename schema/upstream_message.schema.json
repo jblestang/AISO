@@ -22,29 +22,17 @@
   },
   "x-inputSchemaPointer": "/$defs/opensky_response",
   "properties": {
-    "ts": { "type": "string", "format": "date-time" },
-    "icao24": { "type": "string", "pattern": "^[0-9a-fA-F]{6}$" },
-    "lat": { "type": ["number", "null"], "minimum": -90, "maximum": 90 },
-    "lon": { "type": ["number", "null"], "minimum": -180, "maximum": 180 },
-    "velocity": { "type": ["number", "null"], "minimum": 0 },
-    "true_track": { "type": ["number", "null"], "minimum": 0, "maximum": 360 },
-    "geo_altitude": { "type": ["number", "null"] },
-    "baro_altitude": { "type": ["number", "null"] },
-    "vertical_rate": { "type": ["number", "null"] }
+    "ts": { "type": "string", "format": "date-time", "x-allowUpstream": true },
+    "icao24": { "type": "string", "pattern": "^[0-9a-fA-F]{6}$", "x-allowUpstream": true },
+    "lat": { "type": ["number", "null"], "minimum": -90, "maximum": 90, "multipleOf": 0.00001, "x-allowUpstream": true },
+    "lon": { "type": ["number", "null"], "minimum": -180, "maximum": 180, "multipleOf": 0.00001, "x-allowUpstream": true },
+    "velocity": { "type": ["number", "null"], "minimum": 0, "x-allowUpstream": true },
+    "true_track": { "type": ["number", "null"], "minimum": 0, "maximum": 360, "x-allowUpstream": true },
+    "geo_altitude": { "type": ["number", "null"], "x-allowUpstream": true },
+    "baro_altitude": { "type": ["number", "null"], "x-allowUpstream": true },
+    "vertical_rate": { "type": ["number", "null"], "x-allowUpstream": true }
   },
   "required": ["ts", "icao24"],
-
-  "x-allowUpstreamFields": [
-    "ts",
-    "icao24",
-    "lat",
-    "lon",
-    "velocity",
-    "true_track",
-    "geo_altitude",
-    "baro_altitude",
-    "vertical_rate"
-  ],
   "$defs": {
     "opensky_state_vector": {
       "type": "array",

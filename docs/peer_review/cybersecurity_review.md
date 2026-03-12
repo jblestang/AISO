@@ -7,14 +7,13 @@ This review assesses how `aisd-opensky-proxy` could be used or abused to:
 - cause **denial of service (DoS)** (availability loss), or
 - **pass information illicitly** (confidentiality loss) across a one-way boundary.
 
-The software is a low-side (Internet-facing) proxy that polls a JSON provider (OpenSky by default), validates data with JSON Schema, sanitizes/filters it, and transmits sanitized JSON over UDP (plus an optional TCP snapshot service).
+The software is a low-side (Internet-facing) proxy that polls a JSON provider (OpenSky by default), validates data with JSON Schema, sanitizes/filters it, and transmits sanitized JSON over UDP.
 
 ### 2. Assumptions and Trust Boundaries
 
 - **Provider data is untrusted**. It may be malformed, unexpectedly large, or adversarial.
-- **Schema file is trusted configuration**. If an attacker can modify the schema, they can change allowlists, mappings, endpoints, etc.
+- **Schema file is trusted configuration and not attacker-reachable at runtime**. Changes to the schema occur only through controlled deployment or administrative processes.
 - **UDP receiver is assumed to be on the higher-security side** (data diode direction is low → high).
-- **TCP snapshot** is an auxiliary local interface and can be exposed unintentionally if bound to non-local addresses.
 
 ### 3. DoS (Availability) Risks
 
@@ -47,16 +46,7 @@ The software is a low-side (Internet-facing) proxy that polls a JSON provider (O
   - Cap datagrams per poll and drop remainder with warnings/metrics.
   - Consider batching strategy and explicit MTU-aware sizing.
 
-#### 3.4 TCP snapshot misuse
-
-- **Attack vector**: Repeated connections to snapshot port (especially if exposed on 0.0.0.0).
-- **Impact**: File descriptor and CPU consumption; log flooding.
-- **Mitigations**:
-  - Bind TCP to localhost by default (or firewall restrict).
-  - Add connection rate limiting / max concurrent connections.
-  - Consider disabling TCP snapshot in production.
-
-#### 3.5 Logging as a DoS amplifier
+#### 3.4 Logging as a DoS amplifier
 
 - **Attack vector**: Crafted input causes repeated warnings (validation errors, oversize drops).
 - **Impact**: Disk/CPU pressure from logs.
@@ -67,16 +57,17 @@ The software is a low-side (Internet-facing) proxy that polls a JSON provider (O
 
 #### 4.1 Schema/provider directives as a configuration exfil channel
 
-- **Attack vector**: If attacker can alter the schema file, they can:
+- **Assumptions**: The schema file is part of a signed, integrity‑protected configuration set (e.g. verified signature or hash at deployment/startup).
+- **Attack vector** (residual): If an insider or misconfigured deployment **still** manages to alter the schema and its signature/hash, it can:
   - change provider URL
   - modify field mappings
   - modify allowlist
   - encode exfiltration in allowed fields
-- **Impact**: Controlled exfiltration across the boundary.
+- **Impact**: Controlled exfiltration across the boundary within the space defined by the (now‑trusted) configuration.
 - **Mitigations**:
-  - Treat schema as a controlled artifact:
+  - Treat schema as a controlled artifact under configuration/change-management:
     - strict file permissions
-    - integrity checks (hash/signature)
+    - mandatory integrity verification (signature/hash check) before use
     - change control and monitoring
 
 #### 4.2 Whitespace-modulated covert channel in JSON
@@ -92,10 +83,10 @@ The software is a low-side (Internet-facing) proxy that polls a JSON provider (O
 #### 4.3 Numeric covert channel (precision modulation)
 
 - **Attack vector**: Encode data by varying floating-point precision or least significant digits.
-- **Current behavior**: Numbers are forwarded as provided (after schema constraints).
+- **Current behavior**: Floating-point values are quantized to a fixed precision of five decimal digits before serialization, and latitude/longitude are additionally constrained in the schema via `multipleOf: 0.00001`.
 - **Mitigations**:
-  - Quantize/round numeric values to a fixed resolution.
-  - Prefer scaled integers (e.g., lat/lon in 1e-5 degrees) to reduce channel capacity.
+  - Maintain fixed-precision quantization and schema `multipleOf` constraints to cap channel capacity in low-order bits.
+  - If needed, switch to scaled integers for even tighter control.
 
 #### 4.4 Field presence/absence modulation
 
@@ -134,6 +125,6 @@ The software is a low-side (Internet-facing) proxy that polls a JSON provider (O
 1. **Eliminate clone-based chunking** to reduce CPU/memory DoS risk.
 2. Add **caps** (max response size, max records, max datagrams) to bound work per poll.
 3. **Quantize numeric fields** and tighten string constraints to reduce covert channels.
-4. Lock down schema file integrity (permissions + hashes/signatures).
-5. Restrict/disable TCP snapshot in production and rate-limit connections/logging.
+4. Lock down schema file integrity (permissions + hashes/signatures) and include it in configuration-management and deployment reviews.
+5. Rate-limit logging and avoid exposing unnecessary network services.
 

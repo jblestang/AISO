@@ -9,7 +9,7 @@ Test execution for `aisd-opensky-proxy` unit tests.
 - **Command**: `cargo test`
 - **Result**: PASS
 - **Observed**: 6 unit tests executed successfully (no failures)
- - **Observed**: 8 unit tests executed successfully (no failures)
+ - **Observed**: 9 unit tests executed successfully (no failures)
 
 ### 3. Evidence (unit tests)
 
@@ -23,6 +23,7 @@ Latest run output (representative):
 - `upstream_schema_constraints_per_field`: PASS
 - `schema_extensions_missing_or_malformed_are_rejected`: PASS
 - `transmitted_string_values_must_not_contain_whitespace`: PASS
+- `numeric_values_are_quantized_to_fixed_precision`: PASS
 
 ### 4. Requirements Coverage Statement
 
