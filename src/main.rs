@@ -296,13 +296,18 @@ async fn fetch_and_transform(
     provider: &ProviderSpec,
     input_schema: &JSONSchema,
 ) -> Result<Vec<Value>> {
-    let root: Value = client
-        .get(&provider.url)
-        .send()
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
+    // Hard cap on provider JSON size to reduce DoS surface.
+    const MAX_JSON_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
+    let resp = client.get(&provider.url).send().await?.error_for_status()?;
+    let body = resp.bytes().await?;
+    if body.len() > MAX_JSON_BYTES {
+        return Err(anyhow!(
+            "provider JSON too large: {} bytes (max {})",
+            body.len(),
+            MAX_JSON_BYTES
+        ));
+    }
+    let root: Value = serde_json::from_slice(&body)?;
 
     // Validate the full provider JSON against the input schema (OpenSky complete schema lives in $defs).
     if let Err(errors) = input_schema.validate(&root) {

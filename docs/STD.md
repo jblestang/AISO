@@ -116,6 +116,14 @@ cargo run --release -- --udp-dest 127.0.0.1:42000 --poll-secs 5
 
 Observe JSON arrays being received (one per poll, possibly chunked).
 
+#### IT-002 Provider JSON size cap
+
+- **Requirement coverage**: RQ-019
+- **Procedure** (conceptual, requires controllable provider):
+  - Configure a test provider endpoint that returns JSON bodies just below and just above 10 MiB.
+  - Verify that responses below the limit are accepted and processed.
+  - Verify that responses above the limit cause the proxy to log an error and drop the poll without emitting UDP data.
+
 ### 5. Traceability Matrix (Requirements → Tests)
 
 - **RQ-001**: (manual) IT-001 via running proxy
@@ -136,5 +144,6 @@ Observe JSON arrays being received (one per poll, possibly chunked).
 - **RQ-016**: UT-007
 - **RQ-017**: UT-008
 - **RQ-018**: UT-009
+ - **RQ-019**: IT-002
 
 Note: some requirements are best verified as integration/manual (network I/O). If you want full automation, we can add mocked HTTP + UDP receiver tests.

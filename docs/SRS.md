@@ -146,6 +146,10 @@ The software shall enforce `--max-payload-bytes` by:
 - chunking arrays into multiple UDP datagrams when possible, and/or
 - dropping oversize payloads with a warning.
 
+#### RQ-019 Provider JSON Size Cap
+
+The software shall reject any provider HTTP response whose JSON body exceeds 10 mebibytes (10 * 1024 * 1024 bytes) in size.
+
 #### RQ-015 Logging
 
 The software shall log operational events at info/warn level, including UDP bind, TCP bind, validation drops, oversize drops, and send errors.
